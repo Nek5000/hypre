@@ -232,7 +232,6 @@ if (HYPRE_WITH_CUDA)
   if (NOT CMAKE_CUDA_HOST_COMPILER)
     set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
   endif ()
-
   if (CMAKE_CUDA_COMPILER)
 
     enable_language(CUDA)
