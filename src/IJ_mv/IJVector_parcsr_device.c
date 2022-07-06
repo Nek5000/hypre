@@ -618,4 +618,228 @@ hypre_IJVectorAssembleParDevice(hypre_IJVector *vector)
    return hypre_error_flag;
 }
 
+<<<<<<< HEAD
+=======
+/* helper routine used in hypre_IJVectorAssembleParCSRDevice:
+ * 1. sort (X0, A0) with key I0
+ * 2. for each segment in I0, zero out in A0 all before the last `set'
+ * 3. reduce A0 [with sum] and reduce X0 [with max]
+ * N0: input size; N1: size after reduction (<= N0)
+ * Note: (I1, X1, A1) are not resized to N1 but have size N0
+ */
+HYPRE_Int
+hypre_IJVectorAssembleSortAndReduce1(HYPRE_Int       N0,
+                                     HYPRE_BigInt   *I0,
+                                     char           *X0,
+                                     HYPRE_Complex  *A0,
+                                     HYPRE_Int      *N1,
+                                     HYPRE_BigInt  **I1,
+                                     char          **X1,
+                                     HYPRE_Complex **A1 )
+{
+   HYPRE_THRUST_CALL( stable_sort_by_key,
+                      I0,
+                      I0 + N0,
+                      thrust::make_zip_iterator(thrust::make_tuple(X0, A0)) );
+
+   HYPRE_BigInt  *I = hypre_TAlloc(HYPRE_BigInt,  N0, HYPRE_MEMORY_DEVICE);
+   char          *X = hypre_TAlloc(char,          N0, HYPRE_MEMORY_DEVICE);
+   HYPRE_Complex *A = hypre_TAlloc(HYPRE_Complex, N0, HYPRE_MEMORY_DEVICE);
+
+   /* output X: 0: keep, 1: zero-out */
+   HYPRE_THRUST_CALL(
+      exclusive_scan_by_key,
+      make_reverse_iterator(thrust::device_pointer_cast<HYPRE_BigInt>(I0) + N0), /* key begin */
+      make_reverse_iterator(thrust::device_pointer_cast<HYPRE_BigInt>(I0)),      /* key end */
+      make_reverse_iterator(thrust::device_pointer_cast<char>(X0) + N0),         /* input value begin */
+      make_reverse_iterator(thrust::device_pointer_cast<char>(X) + N0),          /* output value begin */
+      char(0),                                                                   /* init */
+      thrust::equal_to<HYPRE_BigInt>(),
+      thrust::maximum<char>() );
+
+   HYPRE_THRUST_CALL(replace_if, A0, A0 + N0, X, thrust::identity<char>(), 0.0);
+
+   auto new_end = HYPRE_THRUST_CALL(
+                     reduce_by_key,
+                     I0,                                                              /* keys_first */
+                     I0 + N0,                                                         /* keys_last */
+                     thrust::make_zip_iterator(thrust::make_tuple(X0,      A0     )), /* values_first */
+                     I,                                                               /* keys_output */
+                     thrust::make_zip_iterator(thrust::make_tuple(X,       A      )), /* values_output */
+                     thrust::equal_to<HYPRE_BigInt>(),                                /* binary_pred */
+                     hypre_IJVectorAssembleFunctor<char, HYPRE_Complex>()             /* binary_op */);
+
+   *N1 = new_end.first - I;
+   *I1 = I;
+   *X1 = X;
+   *A1 = A;
+
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_IJVectorAssembleSortAndReduce3(HYPRE_Int  N0, HYPRE_BigInt  *I0, char *X0, HYPRE_Complex  *A0,
+                                     HYPRE_Int *N1)
+{
+   HYPRE_THRUST_CALL( stable_sort_by_key,
+                      I0,
+                      I0 + N0,
+                      thrust::make_zip_iterator(thrust::make_tuple(X0, A0)) );
+
+   HYPRE_BigInt  *I = hypre_TAlloc(HYPRE_BigInt,  N0, HYPRE_MEMORY_DEVICE);
+   HYPRE_Complex *A = hypre_TAlloc(HYPRE_Complex, N0, HYPRE_MEMORY_DEVICE);
+
+   /* output in X0: 0: keep, 1: zero-out */
+   HYPRE_THRUST_CALL(
+      inclusive_scan_by_key,
+      make_reverse_iterator(thrust::device_pointer_cast<HYPRE_BigInt>(I0) + N0), /* key begin */
+      make_reverse_iterator(thrust::device_pointer_cast<HYPRE_BigInt>(I0)),    /* key end */
+      make_reverse_iterator(thrust::device_pointer_cast<char>(X0) + N0),       /* input value begin */
+      make_reverse_iterator(thrust::device_pointer_cast<char>(X0) + N0),       /* output value begin */
+      thrust::equal_to<HYPRE_BigInt>(),
+      thrust::maximum<char>() );
+
+   HYPRE_THRUST_CALL(replace_if, A0, A0 + N0, X0, thrust::identity<char>(), 0.0);
+
+   auto new_end = HYPRE_THRUST_CALL(
+                     reduce_by_key,
+                     I0,      /* keys_first */
+                     I0 + N0, /* keys_last */
+                     A0,      /* values_first */
+                     I,       /* keys_output */
+                     A        /* values_output */);
+
+   HYPRE_Int Nt = new_end.second - A;
+
+   hypre_assert(Nt <= N0);
+
+   /* remove numerical zeros */
+   auto new_end2 = HYPRE_THRUST_CALL( copy_if,
+                                      thrust::make_zip_iterator(thrust::make_tuple(I, A)),
+                                      thrust::make_zip_iterator(thrust::make_tuple(I, A)) + Nt,
+                                      A,
+                                      thrust::make_zip_iterator(thrust::make_tuple(I0, A0)),
+                                      thrust::identity<HYPRE_Complex>() );
+
+   *N1 = thrust::get<0>(new_end2.get_iterator_tuple()) - I0;
+
+   hypre_assert(*N1 <= Nt);
+
+   hypre_TFree(I, HYPRE_MEMORY_DEVICE);
+   hypre_TFree(A, HYPRE_MEMORY_DEVICE);
+
+   return hypre_error_flag;
+}
+
+/* y[map[i]-offset] = x[i] or y[map[i]] += x[i] depending on SorA,
+ * same index cannot appear more than once in map */
+__global__ void
+hypreCUDAKernel_IJVectorAssemblePar( hypre_DeviceItem &item,
+                                     HYPRE_Int         n,
+                                     HYPRE_Complex    *x,
+                                     HYPRE_BigInt     *map,
+                                     HYPRE_BigInt      offset,
+                                     char             *SorA,
+                                     HYPRE_Complex    *y )
+{
+   HYPRE_Int i = hypre_gpu_get_grid_thread_id<1, 1>(item);
+
+   if (i >= n)
+   {
+      return;
+   }
+
+   if (SorA[i])
+   {
+      y[map[i] - offset] = x[i];
+   }
+   else
+   {
+      y[map[i] - offset] += x[i];
+   }
+}
+
+__global__ void
+hypreCUDAKernel_IJVectorUpdateValues( hypre_DeviceItem &item,
+                                      HYPRE_Int         n,
+                                      HYPRE_Complex    *x,
+                                      HYPRE_BigInt     *indices,
+                                      HYPRE_BigInt      start,
+                                      HYPRE_BigInt      stop,
+                                      char              SorA,
+                                      HYPRE_Complex    *y )
+{
+   HYPRE_Int i = hypre_gpu_get_grid_thread_id<1, 1>(item);
+
+   if (i >= n)
+   {
+      return;
+   }
+
+   HYPRE_Int j;
+
+   if (indices)
+   {
+      j = (HYPRE_Int) (read_only_load(&indices[i]) - start);
+   }
+   else
+   {
+      j = i;
+   }
+
+   if (j < 0 || j > (HYPRE_Int) (stop - start))
+   {
+      return;
+   }
+
+   if (SorA)
+   {
+      y[j] = x[i];
+   }
+   else
+   {
+      y[j] += x[i];
+   }
+}
+
+HYPRE_Int
+hypre_IJVectorUpdateValuesDevice( hypre_IJVector       *vector,
+                                  HYPRE_Int             num_values,
+                                  const HYPRE_BigInt   *indices,
+                                  const HYPRE_Complex  *values,
+                                  const char           *action)
+{
+   HYPRE_BigInt *IJpartitioning = hypre_IJVectorPartitioning(vector);
+   HYPRE_BigInt  vec_start = IJpartitioning[0];
+   HYPRE_BigInt  vec_stop  = IJpartitioning[1] - 1;
+   const char SorA = action[0] == 's' ? 1 : 0;
+
+   if (!indices)
+   {
+      num_values = vec_stop - vec_start + 1;
+   }
+
+   if (num_values <= 0)
+   {
+      return hypre_error_flag;
+   }
+
+   /* set/add to local vector */
+   dim3 bDim = hypre_GetDefaultDeviceBlockDimension();
+   dim3 gDim = hypre_GetDefaultDeviceGridDimension(num_values, "thread", bDim);
+
+   hypre_ParVector *par_vector = (hypre_ParVector*) hypre_IJVectorObject(vector);
+
+   HYPRE_GPU_LAUNCH( hypreCUDAKernel_IJVectorUpdateValues,
+                     gDim, bDim,
+                     num_values, values, indices,
+                     vec_start, vec_stop,
+                     sora,
+                     hypre_VectorData(hypre_ParVectorLocalVector(par_vector)) );
+
+   return hypre_error_flag;
+}
+
+>>>>>>> add a new IJ vector function to update values
 #endif
+
