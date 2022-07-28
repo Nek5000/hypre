@@ -34,6 +34,8 @@
 /* Use cudaMallocAsync */
 #cmakedefine HYPRE_USING_DEVICE_MALLOC_ASYNC 1
 
+#cmakedefine HYPRE_WITH_GPU_AWARE_MPI 1
+
 /* Debug mode */
 #cmakedefine HYPRE_DEBUG 1
 
